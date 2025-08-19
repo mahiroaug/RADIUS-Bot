@@ -1,0 +1,39 @@
+
+
+services:
+  bot:
+    build: ./bot
+    container_name: radius-slack-bot
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - freeradius
+    volumes:
+      - ./radius/authorize:/app/radius/authorize
+    # Socket Modeなのでポート公開不要
+
+  freeradius:
+    image: freeradius/freeradius-server:latest
+    container_name: freeradius
+    ports:
+      - "1812:1812/udp"
+      - "1813:1813/udp"
+    volumes:
+      - ./radius/authorize:/etc/freeradius/mods-config/files/authorize:ro
+      - ./radius/certs:/etc/freeradius/3.0/certs:ro
+    # ステップ2: 実際のRADIUSサーバとして起動
+    command: ["freeradius", "-X"]
+
+  dnsmasq:
+    image: andyshinn/dnsmasq:latest
+    container_name: dnsmasq
+    # DHCP実運用は後続ステップ。現時点では起動維持のみ。
+    command: ["tail", "-f", "/dev/null"]
+    volumes:
+      - ./dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf:ro
+
+networks:
+  default:
+    name: radiusnet
+

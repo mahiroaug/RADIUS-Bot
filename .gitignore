@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Env
+.env
+.env.*.local
+
+# Certs (exclude generated certificates but keep scripts)
+radius/certs/*.pem
+radius/certs/*.key
+radius/certs/dh
+radius/certs/ca.srl
+
+radius/authorize
+
+# Misc
+.DS_Store
+*.log
+

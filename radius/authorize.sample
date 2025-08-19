@@ -1,0 +1,31 @@
+#
+# FreeRADIUS Users File - authorize format (sample)
+# See rlm_files(5) manpage for more information.
+#
+
+# Format: username TAB attribute := "value"
+
+# Example user (PAP/Cleartext for radtest)
+# plain.user	Cleartext-Password := "dev123"
+# 	Reply-Message := "Welcome %{User-Name}"
+
+# Example user (NT-Password for PEAP/MSCHAPv2)
+# Password: "testpass" -> NT-Hash: 35CCBA9168B1D5CA6093B4B7D56C619B
+# nt.user	NT-Password := "35CCBA9168B1D5CA6093B4B7D56C619B"
+# 	Reply-Message := "Welcome %{User-Name}"
+
+#
+# Default entries (from original)
+#
+DEFAULT Framed-Protocol == PPP
+        Framed-Protocol = PPP,
+        Framed-Compression = Van-Jacobson-TCP-IP
+
+DEFAULT Hint == "CSLIP"
+        Framed-Protocol = SLIP,
+        Framed-Compression = Van-Jacobson-TCP-IP
+
+DEFAULT Hint == "SLIP"
+        Framed-Protocol = SLIP
+
+

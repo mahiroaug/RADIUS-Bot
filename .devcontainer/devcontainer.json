@@ -1,0 +1,62 @@
+{
+    "name": "RADIUS-Bot",
+    "image": "mcr.microsoft.com/devcontainers/python:3.11-bullseye",
+    
+    "features": {
+        "ghcr.io/devcontainers/features/docker-in-docker:2.12.2": {
+                "enableNonRootDocker": "true",
+                "moby": "true"
+        }
+    },
+    
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.flake8",
+                "ms-python.black-formatter",
+                "ms-python.isort",
+                "ms-python.pylint",
+                "ms-azuretools.vscode-docker",
+                "redhat.vscode-yaml",
+                "ms-vscode.makefile-tools",
+                "bierner.markdown-mermaid"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/usr/local/bin/python",
+                "python.linting.enabled": true,
+                "python.linting.pylintEnabled": true,
+                "python.linting.flake8Enabled": true,
+                "python.formatting.provider": "black",
+                "python.formatting.blackArgs": ["--line-length=88"],
+                "python.sortImports.args": ["--profile", "black"],
+                "editor.formatOnSave": true,
+                "editor.codeActionsOnSave": {
+                    "source.organizeImports": true
+                },
+                "files.exclude": {
+                    "**/__pycache__": true,
+                    "**/*.pyc": true
+                }
+            }
+        }
+    },
+    
+    "forwardPorts": [1812, 1813],
+    
+    "portsAttributes": {
+
+        "1812": {
+            "label": "RADIUS Auth",
+            "onAutoForward": "ignore"
+        },
+        "1813": {
+            "label": "RADIUS Accounting",
+            "onAutoForward": "ignore"
+        }
+    },
+    
+    "remoteUser": "vscode",
+    
+    "postCreateCommand": ".devcontainer/setup-devcontainer.sh"
+}
