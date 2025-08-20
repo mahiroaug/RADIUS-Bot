@@ -23,7 +23,7 @@
 ---
 
 ## 事前準備
-- FQDN: `radius.web3sst.com`（サーバ名検証に使用）
+- FQDN: `radius.example.com`（サーバ名検証に使用）
 - CAAを運用している場合はLet's Encryptを許可
   - 例: `CAA 0 issue "letsencrypt.org"`
 - Route53: 開発用ノートPC（devcontainer）でCertbotを実行し、TXTを追加できる権限を用意（本番RADIUSサーバにAWS資格情報は置かない）
@@ -34,11 +34,10 @@
 ---
 
 ## 環境変数（.env）
-- 必須: `RADIUS_FQDN=radius.web3sst.com`
-- 任意（配布に使用）
-  - `RADIUS_HOST=<RADIUSサーバのホスト名/IP>`
-  - `RADIUS_USER=<RADIUSサーバのSSHユーザ>`（省略時 `root`）
-- Slack関連は別途設定（Botトークン/アプリレベルトークン等）
+- 必須
+  - `SLACK_APP_TOKEN=...`  Socket Mode用App-Level Token（xapp-）
+  - `SLACK_BOT_TOKEN=...`  Bot User OAuth Token（xoxb-）
+  - `RADIUS_FQDN=...`  公開CAのFQDN（PEAPのサーバ名検証用）
 
 ---
 
@@ -49,11 +48,11 @@
 
 ### 2) 証明書の発行（ノートPC, Route53 DNS-01）
 ```bash
-export RADIUS_FQDN=radius.web3sst.com
+export RADIUS_FQDN=radius.example.com
 sudo certbot certonly \
   --dns-route53 \
   -d "$RADIUS_FQDN" \
-  -m admin@web3sst.com \
+  -m admin@example.com \
   --agree-tos --non-interactive
 ```
 
@@ -142,7 +141,7 @@ interface Gi1/0/1
   - ノートPCで `certbot renew` → `scripts/remote_push_radius_cert.sh` で配布
 ```bash
 certbot renew --quiet && \
-  RADIUS_FQDN=radius.web3sst.com \
+  RADIUS_FQDN=radius.example.com \
   RADIUS_HOST=<RADIUSサーバ> \
   RADIUS_USER=<SSHユーザ> \
   bash scripts/remote_push_radius_cert.sh
