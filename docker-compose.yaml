@@ -28,10 +28,14 @@ services:
   dnsmasq:
     image: andyshinn/dnsmasq:latest
     container_name: dnsmasq
-    # DHCP実運用は後続ステップ。現時点では起動維持のみ。
-    command: ["tail", "-f", "/dev/null"]
+    # DHCP稼働（フォアグラウンド）
+    command: ["dnsmasq", "-k"]
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
     volumes:
       - ./dnsmasq/dnsmasq.conf:/etc/dnsmasq.conf:ro
+      - ./dnsmasq/leases:/var/lib/misc
 
 networks:
   default:

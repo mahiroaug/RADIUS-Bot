@@ -19,3 +19,7 @@ radius/authorize
 .DS_Store
 *.log
 
+# dnsmasq runtime
+dnsmasq/leases/*
+!dnsmasq/leases/.gitkeep
+

@@ -134,6 +134,7 @@ cp .env.sample .env
 # .envファイルにSlackトークンを設定
 cp radius/authorize.sample radius/authorize
 # 初期ユーザー定義ファイルを配置（Docker起動後はBotが追記/更新します）
+## 必要に応じて dnsmasq のインターフェース名を修正（`dnsmasq/dnsmasq.conf`）
 ```
 
 ### 2. Slack App設定 (Socket Mode)
@@ -176,6 +177,19 @@ interface Gi1/0/1
 ## 📁 ディレクトリ構成例
 
 ```
+
+### 5. VLAN + dnsmasq（最小統合）
+- ホストOS側でVLANサブIFを作成して有効化（例: 物理IFが`eno1`のとき）
+```bash
+sudo ip link add link eno1 name eno1.10 type vlan id 10
+sudo ip link set eno1.10 up
+# （任意）未認証用VLAN
+# sudo ip link add link eno1 name eno1.20 type vlan id 20
+# sudo ip link set eno1.20 up
+```
+- `dnsmasq/dnsmasq.conf` の `interface=` を上記に合わせて変更
+- 本Composeでは `dnsmasq` は `network_mode: host` で起動し、DNSを無効化（`port=0`）したDHCP専用として動作します
+- 既存のDHCPサービスと競合しないよう注意（同一VLANで複数DHCPが存在しない状態に）
 project-root/
 ├── bot/
 │   ├── app.py             # Slack Bot エントリ
