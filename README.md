@@ -1,237 +1,202 @@
-# RADIUS + Slack連携 有線LAN認証システム
+# RADIUS + Slack連携 有線LAN認証システム（本番運用ガイド）
 
-本プロジェクトは、社内有線LANのセキュアアクセスを実現するために、**FreeRADIUS + Slack Bot (Socket Mode) + dnsmasq + Cisco Catalyst スイッチ** を組み合わせた仕組みを提供します。  
-ユーザーは Slack DM 経由で自分のアカウントを登録・管理し、802.1X認証を通じて LAN 接続を行います。
-
----
-
-## 🎯 目的と要件
-
-- 端末規模: 30台前後（Mac中心、一部 Windows/Linux）
-- セキュリティ要件: 認証済端末のみLAN/インターネット接続可能
-- 運用性: 証明書配布は避け、Slack Socket Modeを入口としたユーザーセルフサービスを実現
-- ネットワーク機器: Cisco Catalyst (802.1X対応)
-- サーバ: MiniPC上でDocker稼働
+本ドキュメントは、公開CA（Let's Encrypt）＋DNS-01（Route53）で取得したサーバ証明書を用い、FreeRADIUS（PEAP）＋Slack Bot（Socket Mode）＋dnsmasq（DHCP）＋Cisco Catalyst（802.1X）を本番運用するための手順に特化しています。開発向け手順は付録に分離します。
 
 ---
 
-## 🏗 システム全体像
-
-```mermaid
-graph TB
-    subgraph "ユーザー環境"
-        A["ユーザー端末<br/>(Mac/Windows/Linux)"]
-        B["Slack Client"]
-    end
-    
-    subgraph "ネットワーク機器"
-        C["Cisco Catalyst Switch<br/>(802.1X対応)"]
-    end
-    
-    subgraph "MiniPCサーバ (Docker)"
-        D["FreeRADIUS<br/>(PEAP認証処理)"]
-        E["dnsmasq<br/>(VLANごとのDHCP)"]
-        F["Slack Bot<br/>(Socket Mode)"]
-    end
-    
-    subgraph "外部サービス"
-        H["Slack Cloud"]
-    end
-    
-    A -.->|"802.1X EAP-PEAP"| C
-    C <-->|"RADIUS認証"| D
-    C <-->|"DHCP要求/応答"| E
-    B <-->|"Slack API"| H
-    F <-->|"WebSocket"| H
-    F -.->|"ユーザー管理"| D
-    
-    style A fill:#e1f5fe
-    style B fill:#e1f5fe
-    style C fill:#fff3e0
-    style D fill:#f3e5f5
-    style E fill:#f3e5f5
-    style F fill:#f3e5f5
-    style H fill:#e8f5e8
-```
-
+## 目的と前提
+- 目的: 認証成功端末のみVLAN10へ収容し、ユーザーはSlackから自身のRADIUSアカウントをセルフ運用。
+- 規模: 約30台（Mac中心、一部Windows/Linux）。
+- 認証方式: IEEE 802.1X（EAP-PEAP + MSCHAPv2）。クライアント証明書は不要。
+- ネットワーク: Cisco Catalyst。未認証は遮断（ゲストVLANなし）。
+- サーバ: オンプレMiniPC上でDocker稼働。
+- 証明書: 公開CA（Let's Encrypt）をDNS-01（Route53）で取得。サーバ名検証を必須化。
 
 ---
 
-## 🔐 認証方式
-
-- **方式**: IEEE 802.1X + EAP-PEAP + MSCHAPv2
-- **特徴**:
-  - ID/Password をTLSトンネル内でやり取り（平文漏洩防止）
-  - サーバ証明書でFreeRADIUSを検証
-  - クライアント証明書は不要（運用コスト低減）
+## 構成概要
+- FreeRADIUS: PEAP認証。Slack BotがユーザーID/パスワードを管理。
+- Slack Bot（Python, slack_bolt, Socket Mode）: DMコマンドでユーザー自身が登録/削除/再発行。
+- dnsmasq: DHCP（DNS機能は無効化）。VLAN10へIP配布。
+- Cisco Catalyst: 802.1X中継。成功時のみVLAN10へ。
 
 ---
 
-## 💬 Slack Bot 機能 (Socket Mode)
-
-**Socket Mode接続**でngrok/HTTPS不要。ユーザーは **Slack DMのみ** で操作可能。他人のアカウントは操作不可。
-
-### コマンド一覧
-
-| コマンド              | 機能説明                                                           |
-|-----------------------|--------------------------------------------------------------------|
-| `/radius_register`     | 自分用のRADIUSアカウント作成、ランダムパスワード生成しDM通知       |
-| `/radius_unregister`   | 自分のアカウントを削除                                            |
-| `/radius_status`       | アカウントの状態・最終利用日・有効期限などを表示                  |
-| `/radius_resetpass`    | パスワードをリセット                                                |
-| `/radius_help`         | コマンド一覧と利用方法を表示                                      |
+## 事前準備
+- FQDN: `radius.web3sst.com`（サーバ名検証に使用）
+- CAAを運用している場合はLet's Encryptを許可
+  - 例: `CAA 0 issue "letsencrypt.org"`
+- Route53: 開発用ノートPC（devcontainer）でCertbotを実行し、TXTを追加できる権限を用意（本番RADIUSサーバにAWS資格情報は置かない）
+- ネットワーク設計
+  - VLAN10: 192.168.4.0/22（GW 192.168.4.1）
+  - 802.1X成功時のみVLAN10へ。未認証は遮断。
 
 ---
 
-## 📦 コンポーネント詳細
-
-### FreeRADIUS
-- Dockerイメージ: `freeradius/freeradius-server`
-- 設定: `mods-enabled/eap`, `sites-enabled/default`
-- ユーザーデータ: Slack Botが `users` ファイルまたは外部DBに書き込み
-- 認証失敗端末は VLAN に未所属 → DHCP応答なし
-
-### dnsmasq
-- DHCPサーバ（軽量・Docker親和性◎）
-- VLANごとのIPレンジ設定
-- 設定例:
-  ```conf
-  interface=eth0.10
-  dhcp-range=10.10.10.100,10.10.10.200,12h
-
-  interface=eth0.20
-  dhcp-range=10.20.20.100,10.20.20.200,6h
-  ```
-
-### Slack Bot (Socket Mode)
-- 言語: Python
-- ライブラリ: slack_bolt (Socket Mode対応)
-- 接続方式: WebSocket (ngrok/HTTPS不要)
-- 処理:
-  - Socket Mode経由でSlackイベントを受信
-  - FreeRADIUSのアカウント作成/削除
-  - パスワード生成（安全な乱数 + 一時保存）
-  - DMで結果を返す
+## 環境変数（.env）
+- 必須: `RADIUS_FQDN=radius.web3sst.com`
+- 任意（配布に使用）
+  - `RADIUS_HOST=<RADIUSサーバのホスト名/IP>`
+  - `RADIUS_USER=<RADIUSサーバのSSHユーザ>`（省略時 `root`）
+- Slack関連は別途設定（Botトークン/アプリレベルトークン等）
 
 ---
 
-## 📡 ネットワークフロー
+## セットアップ手順（本番）
 
-1. 端末がスイッチに接続
-2. 802.1X認証要求 (EAPOL)
-3. ユーザーが Slack Bot で発行されたID/PASSを入力
-4. FreeRADIUSで認証
-5. 認証成功 → VLAN10へ割当 → DHCPでIP取得
-6. 認証失敗 → VLAN未所属 → ネットワーク不可
+### 1) DevContainer初期化（ノートPC）
+- DevContainer作成後、`.devcontainer/setup-devcontainer.sh` が自動実行され、Python依存とCertbot + Route53プラグインを導入します。
 
----
-
-## 🔧 セットアップ手順（概要）
-
-### 1. 環境設定
+### 2) 証明書の発行（ノートPC, Route53 DNS-01）
 ```bash
-cp .env.sample .env
-# .envファイルにSlackトークンを設定
-cp radius/authorize.sample radius/authorize
-# 初期ユーザー定義ファイルを配置（Docker起動後はBotが追記/更新します）
-## 必要に応じて dnsmasq のインターフェース名を修正（`dnsmasq/dnsmasq.conf`）
+export RADIUS_FQDN=radius.web3sst.com
+sudo certbot certonly \
+  --dns-route53 \
+  -d "$RADIUS_FQDN" \
+  -m admin@web3sst.com \
+  --agree-tos --non-interactive
 ```
 
-### 2. Slack App設定 (Socket Mode)
-- Socket Mode を有効化
-- App-Level Token を生成 (SLACK_APP_TOKEN)
-- Slash Commands に /radius_* を登録
-- Bot Token Scopes:
-  - chat:write
-  - commands
-  - im:history
-  - users:read
+### 3) 証明書の配布（ノートPC → オンプレRADIUS）
+```bash
+export RADIUS_HOST=<RADIUSサーバのIP/ホスト名>
+export RADIUS_USER=<SSHユーザ>   # 省略可
+# 発行結果（/etc/letsencrypt/live/<FQDN>）をRADIUSへ配布
+bash scripts/remote_push_radius_cert.sh
+# または一括（発行→配布）
+bash scripts/prod/issue_and_deploy_cert.sh
+```
+- サーバ側配置と役割
+  - `radius/certs/server.pem` ← fullchain.pem（中間含む）
+  - `radius/certs/server.key` ← privkey.pem
+  - `radius/certs/ca.pem`     ← chain.pem or fullchain.pem
+  - `radius/certs/dh`         ← 別途生成（次項）
 
-### 3. Docker起動
+### 4) DHパラメータの生成（サーバ側1回）
+```bash
+openssl dhparam -out radius/certs/dh 2048
+chmod 644 radius/certs/dh
+```
+
+### 5) dnsmasq（DHCP）
+- `dnsmasq/dnsmasq.conf` はDHCP専用（`port=0`）。VLAN10の例:
+```conf
+no-daemon
+log-queries
+log-dhcp
+bind-interfaces
+port=0
+no-resolv
+no-hosts
+dhcp-authoritative
+dhcp-leasefile=/var/lib/misc/dnsmasq.leases
+
+# VLAN10（インタフェース名は環境に合わせて変更: 例 eth0.10 / eno1.10 など）
+interface=eth0.10
+# 192.168.4.0/22 の一部範囲を配布（必要に応じて調整）
+dhcp-range=interface:eth0.10,192.168.5.0,192.168.7.254,255.255.252.0,12h
+# デフォルトゲートウェイ / DNS（パブリックDNS）
+dhcp-option=interface:eth0.10,option:router,192.168.4.1
+dhcp-option=interface:eth0.10,option:dns-server,8.8.8.8,1.1.1.1
+```
+- コンテナは `network_mode: host`。リースは `./dnsmasq/leases` に保存。
+
+### 6) Docker起動
 ```bash
 docker-compose up -d --build
 ```
+- 主要ボリューム
+  - `./radius/certs` → `/etc/freeradius/3.0/certs:ro`
+  - `./radius/authorize` → `/etc/freeradius/mods-config/files/authorize:ro`
+  - `./dnsmasq/dnsmasq.conf` → `/etc/dnsmasq.conf:ro`
+  - `./dnsmasq/leases` → `/var/lib/misc`
 
-メンテナンス
-
-```bash
-docker-compose down && docker-compose up -d --build --force-recreate
-docker-compose up -d --build --force-recreate
-```
-
-### 4. Cisco Catalyst設定
+### 7) Cisco Catalyst（例）
 ```cisco
+! グローバル
 aaa new-model
-aaa authentication dot1x default group radius
-radius-server host 192.168.1.10 key radiusSecret
-
+dot1x system-auth-control
+radius server RADIUS1
+ address ipv4 <RADIUSサーバIP> auth-port 1812 acct-port 1813
+ key radiusSecret
+!
+! 対象ポート（例: Gi1/0/1）
 interface Gi1/0/1
-  switchport mode access
-  authentication port-control auto
-  dot1x pae authenticator
-  authentication event success vlan 10
+ switchport mode access
+ authentication port-control auto
+ dot1x pae authenticator
+ authentication event success vlan 10
+! 未認証は遮断（ゲストVLANなし）
 ```
+
+### 8) Slack App（Socket Mode）
+- コマンド: `/radius_register`, `/radius_unregister`, `/radius_status`, `/radius_resetpass`, `/radius_help`
+- 構成
+  - Socket Mode有効化、App-Level Token（SLACK_APP_TOKEN）
+  - Bot Tokenスコープ: `chat:write`, `commands`, `im:history`, `users:read`
 
 ---
 
-## 📁 ディレクトリ構成例
-
-```
-
-### 5. VLAN + dnsmasq（最小統合）
-- ホストOS側でVLANサブIFを作成して有効化（例: 物理IFが`eno1`のとき）
+## 運用
+- 証明書の更新（90日ごと）
+  - ノートPCで `certbot renew` → `scripts/remote_push_radius_cert.sh` で配布
 ```bash
-sudo ip link add link eno1 name eno1.10 type vlan id 10
-sudo ip link set eno1.10 up
-# （任意）未認証用VLAN
-# sudo ip link add link eno1 name eno1.20 type vlan id 20
-# sudo ip link set eno1.20 up
+certbot renew --quiet && \
+  RADIUS_FQDN=radius.web3sst.com \
+  RADIUS_HOST=<RADIUSサーバ> \
+  RADIUS_USER=<SSHユーザ> \
+  bash scripts/remote_push_radius_cert.sh
 ```
-- `dnsmasq/dnsmasq.conf` の `interface=` を上記に合わせて変更
-- 本Composeでは `dnsmasq` は `network_mode: host` で起動し、DNSを無効化（`port=0`）したDHCP専用として動作します
-- 既存のDHCPサービスと競合しないよう注意（同一VLANで複数DHCPが存在しない状態に）
+- 監視/ログ
+  - `docker-compose logs -f freeradius`
+  - `docker-compose logs -f dnsmasq`
+  - Catalyst: `show authentication sessions`, `show dot1x all`
+- セキュリティ
+  - クライアントで「サーバ証明書検証＋サーバ名一致」を必須化
+  - 秘密鍵（server.key）は600/リポジトリ非管理
+  - Slackトークンは.envで厳格管理
+
+---
+
+## E2Eテスト
+1. Slackで `/radius_register` → ID/パスワード発行
+2. 端末の有線802.1Xに上記のID/PASSを設定
+3. 認証成功 → VLAN10 → DHCPでIP取得（192.168.4.0/22）
+4. インターネット疎通確認
+5. 失敗系: 未登録/誤パス → ポート遮断（DHCP不取得）
+
+---
+
+## ディレクトリ（抜粋）
+```
 project-root/
-├── bot/
-│   ├── app.py             # Slack Bot エントリ
-│   ├── Dockerfile         # Bot コンテナ定義
-│   └── requirements.txt   # Python依存パッケージ
-├── radius/
-│   ├── authorize.sample   # FreeRADIUS ユーザー定義（サンプル）
-│   └── certs/             # TLS証明書（開発用）
-│       ├── ca.pem         # CA証明書
-│       ├── ca.key         # CA秘密鍵
-│       ├── server.pem     # サーバ証明書
-│       ├── server.key     # サーバ秘密鍵
-│       ├── dh             # DH パラメータ
-│       └── generate-certs.sh # 証明書生成スクリプト
+├── bot/                      # Slack Bot（Python, Socket Mode）
 ├── dnsmasq/
-│   └── dnsmasq.conf       # DHCP設定
-├── docker-compose.yaml    # コンテナ構成定義
+│   ├── dnsmasq.conf          # DHCP設定（DNS無効化）
+│   └── leases/               # リース永続化
+├── radius/
+│   ├── authorize.sample      # FreeRADIUS ユーザー定義（サンプル）
+│   └── certs/                # 本番: server.pem/server.key/ca.pem/dh を配置
+├── scripts/
+│   ├── dev/
+│   │   └── generate_dev_certs.sh       # 開発用：自己署名生成（本番では未使用）
+│   ├── prod/
+│   │   └── issue_and_deploy_cert.sh    # 本番：発行→配布の一括実行
+│   └── remote_push_radius_cert.sh      # 本番：生成済み証明書の配布
+├── docker-compose.yaml
 └── README.md
 ```
 
 ---
 
-## 🔒 セキュリティ考慮
-
-- パスワードはSlack DMのみ通知、サーバに平文保存しない
-- Socket Mode接続で外部ポート公開不要（セキュリティ向上）
-- WebSocket通信はSlackが署名検証済み
-- アカウント失効（/radius_unregister）やパスワード更新をSlackから即時反映
-- ログ管理: 発行ユーザー・時刻・利用状況をDockerログに保存
-
----
-
-## 🔄 将来拡張
-
-- EAP-TLS証明書方式（証明書配布をSlack Bot経由で行う）
-- アカウント有効期限制（一定期間で自動削除）
-- 管理者コマンド（全ユーザー一覧、強制削除）
-- QRコード / .mobileconfig配布（スマホ対応）
-- Webhook方式への移行（高負荷時のスケールアップ対応）
+## 付録（開発）
+- 自己署名での動作確認（本番では使用しない）
+```bash
+bash scripts/dev/generate_dev_certs.sh
+# 生成先: radius/certs/{server.pem,server.key,ca.pem,dh}
+```
 
 ---
 
-## 📜 ライセンス
-
+## ライセンス
 MIT
