@@ -20,9 +20,19 @@ python3 -m pip install pytest black flake8 isort pylint
 # Certbot + Route53 プラグイン（DNS-01 用）
 echo "🔐 Installing Certbot + Route53 plugin for DNS-01..."
 if command -v apt-get >/dev/null 2>&1; then
+    # use sudo when not running as root
+    SUDO=""
+    if [ "$EUID" -ne 0 ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+        else
+            echo "⚠️ sudo が無く、rootでもありません。certbotの自動インストールをスキップします。" >&2
+            exit 0
+        fi
+    fi
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y certbot python3-certbot-dns-route53
+    $SUDO apt-get update -y
+    $SUDO apt-get install -y certbot python3-certbot-dns-route53
     if command -v certbot >/dev/null 2>&1; then
         echo "certbot: $(certbot --version)"
         certbot plugins 2>/dev/null | grep -qi route53 && \

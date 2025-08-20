@@ -30,87 +30,116 @@
 - ネットワーク設計
   - VLAN10: 192.168.4.0/22（GW 192.168.4.1）
   - 802.1X成功時のみVLAN10へ。未認証は遮断。
+- オペレータ端末からRADIUSサーバへSSH接続できること（鍵認証推奨。証明書配布スクリプトで使用）
 
 ---
 
+## 簡易構成図
+
+```mermaid
+graph LR
+  OP["オペレータ端末<br/>(ノートPC/devcontainer)"]
+  RS["RADIUSサーバ<br/>(FreeRADIUS + dnsmasq + Slack Bot)"]
+  SL["Slack Cloud"]
+  UT["ユーザー端末<br/>(LANクライアント)"]
+
+  OP -- "SSH (証明書発行/配布)" --> RS
+  RS <-- "Slack Socket Mode (WebSocket)" --> SL
+  UT <-->|"Slack DM (ユーザ登録/削除/再発行)"| SL
+  UT -- "EAP-PEAP (802.1X)" --> RS
+```
+
+
 ## 環境変数（.env）
-- 必須
+- Radiusサーバサイド（botコンテナ）
   - `SLACK_APP_TOKEN=...`  Socket Mode用App-Level Token（xapp-）
   - `SLACK_BOT_TOKEN=...`  Bot User OAuth Token（xoxb-）
   - `RADIUS_FQDN=...`  公開CAのFQDN（PEAPのサーバ名検証用）
+
+- ノートPCオペレータ端末サイド（証明書配布用）
+  - `RADIUS_HOST=...`  RADIUSサーバのIPアドレスまたはホスト名（証明書配布スクリプト用）
+  - `RADIUS_USER=...`  RADIUSサーバへのSSHユーザー名（省略時はデフォルトユーザーを使用）
+  - `RADIUS_FQDN=...`  公開CAのFQDN（PEAPのサーバ名検証用）
+
 
 ---
 
 ## セットアップ手順（本番）
 
-### 1) DevContainer初期化（ノートPC）
-- DevContainer作成後、`.devcontainer/setup-devcontainer.sh` が自動実行され、Python依存とCertbot + Route53プラグインを導入します。
-
-### 2) 証明書の発行（ノートPC, Route53 DNS-01）
+### ノートPC側（証明書発行・配布）
+1) リポジトリ取得
 ```bash
-export RADIUS_FQDN=radius.example.com
-sudo certbot certonly \
-  --dns-route53 \
-  -d "$RADIUS_FQDN" \
-  -m admin@example.com \
-  --agree-tos --non-interactive
+git clone https://github.com/mahiroaug/RADIUS-Bot.git
+cd RADIUS-Bot
+```
+2) DevContainer起動（推奨）
+```bash
+# VS Code: Reopen in Container
+# post-createでCertbot + Route53プラグインを自動導入
+```
+3) Route53認証情報の準備
+```bash
+# a) ホストの ~/.aws をdevcontainerへマウント（devcontainer.jsonで設定済）
+# b) devcontainer内で credentials を作成
+mkdir -p ~/.aws && chmod 700 ~/.aws
+cat > ~/.aws/credentials << 'EOF'
+[default]
+aws_access_key_id=AKIA...
+aws_secret_access_key=xxxx...
+# aws_session_token=...
+EOF
+chmod 600 ~/.aws/credentials
 ```
 
-### 3) 証明書の配布（ノートPC → オンプレRADIUS）
+4) 証明書関係 一括実行（推奨｜スクリプトで発行→配布）
 ```bash
-export RADIUS_HOST=<RADIUSサーバのIP/ホスト名>
-export RADIUS_USER=<SSHユーザ>   # 省略可
-# 発行結果（/etc/letsencrypt/live/<FQDN>）をRADIUSへ配布
-bash scripts/remote_push_radius_cert.sh
-# または一括（発行→配布）
 bash scripts/prod/issue_and_deploy_cert.sh
 ```
-- サーバ側配置と役割
-  - `radius/certs/server.pem` ← fullchain.pem（中間含む）
-  - `radius/certs/server.key` ← privkey.pem
-  - `radius/certs/ca.pem`     ← chain.pem or fullchain.pem
-  - `radius/certs/dh`         ← 別途生成（次項）
 
-### 4) DHパラメータの生成（サーバ側1回）
+参考（手動｜certbot発行→配布）
 ```bash
-openssl dhparam -out radius/certs/dh 2048
-chmod 644 radius/certs/dh
+sudo certbot certonly \
+  --dns-route53 \
+  -d "$(grep '^RADIUS_FQDN=' .env | cut -d= -f2)" \
+  -m admin@example.com \
+  --agree-tos --non-interactive
+
+bash scripts/remote_push_radius_cert.sh
+```
+5) 配布結果の確認（任意）
+```bash
+ssh ${RADIUS_USER:-root}@${RADIUS_HOST} 'ls -l /workspaces/RADIUS-Bot/radius/certs && docker compose ps freeradius'
 ```
 
-### 5) dnsmasq（DHCP）
-- `dnsmasq/dnsmasq.conf` はDHCP専用（`port=0`）。VLAN10の例:
-```conf
-no-daemon
-log-queries
-log-dhcp
-bind-interfaces
-port=0
-no-resolv
-no-hosts
-dhcp-authoritative
-dhcp-leasefile=/var/lib/misc/dnsmasq.leases
-
-# VLAN10（インタフェース名は環境に合わせて変更: 例 eth0.10 / eno1.10 など）
-interface=eth0.10
-# 192.168.4.0/22 の一部範囲を配布（必要に応じて調整）
-dhcp-range=interface:eth0.10,192.168.5.0,192.168.7.254,255.255.252.0,12h
-# デフォルトゲートウェイ / DNS（パブリックDNS）
-dhcp-option=interface:eth0.10,option:router,192.168.4.1
-dhcp-option=interface:eth0.10,option:dns-server,8.8.8.8,1.1.1.1
+### RADIUSサーバ側（サービス起動）
+1) リポジトリ取得
+```bash
+git clone https://github.com/<org>/RADIUS-Bot.git
+cd RADIUS-Bot
 ```
-- コンテナは `network_mode: host`。リースは `./dnsmasq/leases` に保存。
 
-### 6) Docker起動
+2) RADIUS初期ファイル
+```bash
+cp radius/authorize.sample radius/authorize   # 初回のみ
+openssl dhparam -out radius/certs/dh 2048 && chmod 644 radius/certs/dh
+```
+3) VLANサブIFとdnsmasq設定
+```bash
+# 例: 物理IFが eno1、VLAN10 を使用
+sudo ip link add link eno1 name eno1.10 type vlan id 10
+sudo ip link set eno1.10 up
+# dnsmasq/dnsmasq.conf の interface= を eno1.10 に変更
+```
+4) 起動
 ```bash
 docker-compose up -d --build
 ```
-- 主要ボリューム
-  - `./radius/certs` → `/etc/freeradius/3.0/certs:ro`
-  - `./radius/authorize` → `/etc/freeradius/mods-config/files/authorize:ro`
-  - `./dnsmasq/dnsmasq.conf` → `/etc/dnsmasq.conf:ro`
-  - `./dnsmasq/leases` → `/var/lib/misc`
-
-### 7) Cisco Catalyst（例）
+5) ログ確認
+```bash
+docker-compose logs -f freeradius | sed -n '1,120p'
+docker-compose logs -f dnsmasq | sed -n '1,120p'
+```
+6) Cisco Catalyst（例）
 ```cisco
 ! グローバル
 aaa new-model
@@ -128,7 +157,7 @@ interface Gi1/0/1
 ! 未認証は遮断（ゲストVLANなし）
 ```
 
-### 8) Slack App（Socket Mode）
+### Slack App（Socket Mode）
 - コマンド: `/radius_register`, `/radius_unregister`, `/radius_status`, `/radius_resetpass`, `/radius_help`
 - 構成
   - Socket Mode有効化、App-Level Token（SLACK_APP_TOKEN）
