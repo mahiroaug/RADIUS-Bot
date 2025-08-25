@@ -26,11 +26,12 @@
 - FQDN: `radius.example.com`（サーバ名検証に使用）
 - CAAを運用している場合はLet's Encryptを許可
   - 例: `CAA 0 issue "letsencrypt.org"`
-- Route53: 開発用ノートPC（devcontainer）でCertbotを実行し、TXTを追加できる権限を用意（本番RADIUSサーバにAWS資格情報は置かない）
+- Route53: Lambda に最小権限のTXT更新権限を付与（RADIUSサーバにAWS資格情報は不要）
 - ネットワーク設計
-  - VLAN10: 192.168.4.0/22（GW 192.168.4.1）
+  - VLAN10: 192.168.40.0/22（GW 192.168.40.1）
   - 802.1X成功時のみVLAN10へ。未認証は遮断。
-- オペレータ端末からRADIUSサーバへSSH接続できること（鍵認証推奨。証明書配布スクリプトで使用）
+- RADIUSサーバからインターネット（HTTPS）へアウトバウンド可能（S3から証明書取得のため）
+- S3側でバケット/オブジェクトへのアクセス制御（固定公開URL + ソースIP制限）
 
 ---
 
@@ -43,7 +44,6 @@ graph LR
   SL["Slack Cloud"]
   UT["ユーザー端末<br/>(LANクライアント)"]
 
-  OP -- "SSH (証明書発行/配布)" --> RS
   RS <-- "Slack Socket Mode (WebSocket)" --> SL
   UT <-->|"Slack DM (ユーザ登録/削除/再発行)"| SL
   UT -- "EAP-PEAP (802.1X)" --> RS
@@ -56,9 +56,10 @@ graph LR
   - `SLACK_BOT_TOKEN=...`  Bot User OAuth Token（xoxb-）
   - `RADIUS_FQDN=...`  公開CAのFQDN（PEAPのサーバ名検証用）
 
-- ノートPCオペレータ端末サイド（証明書配布用）
-  - `RADIUS_HOST=...`  RADIUSサーバのIPアドレスまたはホスト名（証明書配布スクリプト用）
-  - `RADIUS_USER=...`  RADIUSサーバへのSSHユーザー名（省略時はデフォルトユーザーを使用）
+- Radiusサーバサイド（Pull配布用）
+  - `CERT_URL_SERVER_PEM=...` S3上のserver.pem(URL)
+  - `CERT_URL_SERVER_KEY=...` S3上のserver.key(URL)
+  - `CERT_URL_CA_PEM=...`    S3上のca.pem(URL)
   - `RADIUS_FQDN=...`  公開CAのFQDN（PEAPのサーバ名検証用）
 
 
@@ -66,50 +67,10 @@ graph LR
 
 ## セットアップ手順（本番）
 
-### ノートPC側（証明書発行・配布）
-1) リポジトリ取得
-```bash
-git clone https://github.com/mahiroaug/RADIUS-Bot.git
-cd RADIUS-Bot
-```
-2) DevContainer起動（推奨）
-```bash
-# VS Code: Reopen in Container
-# post-createでCertbot + Route53プラグインを自動導入
-```
-3) Route53認証情報の準備
-```bash
-# a) ホストの ~/.aws をdevcontainerへマウント（devcontainer.jsonで設定済）
-# b) devcontainer内で credentials を作成
-mkdir -p ~/.aws && chmod 700 ~/.aws
-cat > ~/.aws/credentials << 'EOF'
-[default]
-aws_access_key_id=AKIA...
-aws_secret_access_key=xxxx...
-# aws_session_token=...
-EOF
-chmod 600 ~/.aws/credentials
-```
-
-4) 証明書関係 一括実行（推奨｜スクリプトで発行→配布）
-```bash
-bash scripts/prod/issue_and_deploy_cert.sh
-```
-
-参考（手動｜certbot発行→配布）
-```bash
-sudo certbot certonly \
-  --dns-route53 \
-  -d "$(grep '^RADIUS_FQDN=' .env | cut -d= -f2)" \
-  -m admin@example.com \
-  --agree-tos --non-interactive
-
-bash scripts/remote_push_radius_cert.sh
-```
-5) 配布結果の確認（任意）
-```bash
-ssh ${RADIUS_USER:-root}@${RADIUS_HOST} 'ls -l /workspaces/RADIUS-Bot/radius/certs && docker compose ps freeradius'
-```
+### 証明書発行・保存（Lambda 側の要点）
+- certbot/lego + Route53 直更新（dns-01）。`_acme-challenge.<FQDN>` のTXTをLambdaが追加・検証・削除
+- 発行した `fullchain.pem`/`privkey.pem`/`ca` を S3(KMS) に保存
+- 固定の公開URL（`https://<bucket>.s3.<region>.amazonaws.com/<path>`）を使用し、S3バケットポリシーでRADIUSサーバの送信元IPに限定
 
 ### RADIUSサーバ側（サービス起動）
 1) リポジトリ取得
@@ -167,14 +128,8 @@ interface Gi1/0/1
 
 ## 運用
 - 証明書の更新（90日ごと）
-  - ノートPCで `certbot renew` → `scripts/remote_push_radius_cert.sh` で配布
-```bash
-certbot renew --quiet && \
-  RADIUS_FQDN=radius.example.com \
-  RADIUS_HOST=<RADIUSサーバ> \
-  RADIUS_USER=<SSHユーザ> \
-  bash scripts/remote_push_radius_cert.sh
-```
+  - EventBridge で Lambda を定期実行（残存日数<=30日で更新）
+  - RADIUS サーバは S3 から `pull_and_deploy_from_s3.sh` で取得・反映
 - 監視/ログ
   - `docker-compose logs -f freeradius`
   - `docker-compose logs -f dnsmasq`
@@ -186,10 +141,71 @@ certbot renew --quiet && \
 
 ---
 
+## 証明書更新フロー（Route53 直更新 + Lambda｜Pull配布）
+
+- 前提
+  - EventBridge が Lambda を定期起動（毎日/毎週）
+  - Lambda はRoute53のホストゾーンにTXTを追加できる最小権限を保持
+  - 発行後の `fullchain.pem`/`privkey.pem` は S3(KMS) に格納
+
+- データフロー（何が・いつ・どこへ）
+  - チャレンジ値: Lambda → Route53（`_acme-challenge.<FQDN>` TXTを追加）
+  - チャレンジ検証: Let’s Encrypt → Route53（TXT確認）
+  - 証明書発行: Let’s Encrypt → Lambda（`fullchain.pem`/`privkey.pem`）
+  - 保管: Lambda → S3(KMS)
+  - 配布: RADIUSサーバが S3 から取得（`pull_and_deploy_from_s3.sh`）→ `deploy_radius_cert.sh` → FreeRADIUS再読込
+
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant EB as EventBridge(スケジュール)
+  participant L as Lambda(更新ジョブ)
+  participant LE as Let's Encrypt(ACME)
+  participant R53 as Route53(DNS)
+  participant S3 as S3(KMS)
+  participant RS as RADIUSサーバ
+
+  EB->>L: 定期起動
+  L->>LE: 新規/更新オーダー(ACME)
+  LE-->>L: dns-01 チャレンジ値
+  L->>R53: _acme-challenge.<FQDN> TXT 追加
+  LE->>R53: TXT をクエリ
+  R53-->>LE: TXT 応答（検証OK）
+  LE-->>L: 証明書発行（fullchain/privkey）
+  L->>S3: 保管(KMS暗号化)
+  RS->>S3: 固定公開URL(ソースIP制限)でダウンロード
+  S3-->>RS: server.pem/key/ca.pem
+  RS->>RS: pull_and_deploy_from_s3.sh → deploy_radius_cert.sh → reload
+```
+
+補足
+- RADIUS サーバには AWS 資格情報を置かない（S3固定公開URL + ソースIP制限によるPull運用）
+
+
+---
+
+
+## S3 Pull 方式（RADIUSサーバ側）
+
+- 事前: S3 バケットに `server.pem`(=fullchain), `server.key`(=privkey), `ca.pem` を保存
+  - 固定公開URLを使用し、S3バケットポリシーでRADIUSサーバの送信元IPに限定
+- 実行（RADIUSサーバ）
+```bash
+cat > .env << 'EOF'
+CERT_URL_SERVER_PEM=https://<bucket>.s3.<region>.amazonaws.com/<path>/server.pem
+CERT_URL_SERVER_KEY=https://<bucket>.s3.<region>.amazonaws.com/<path>/server.key
+CERT_URL_CA_PEM=https://<bucket>.s3.<region>.amazonaws.com/<path>/ca.pem
+EOF
+bash scripts/prod/pull_and_deploy_from_s3.sh
+```
+- 注意: `server.key` は転送後にローカルで600になるよう `deploy_radius_cert.sh` が権限設定します
+
+
 ## E2Eテスト
 1. Slackで `/radius_register` → ID/パスワード発行
 2. 端末の有線802.1Xに上記のID/PASSを設定
-3. 認証成功 → VLAN10 → DHCPでIP取得（192.168.4.0/22）
+3. 認証成功 → VLAN10 → DHCPでIP取得（192.168.40.0/22）
 4. インターネット疎通確認
 5. 失敗系: 未登録/誤パス → ポート遮断（DHCP不取得）
 
@@ -209,8 +225,7 @@ project-root/
 │   ├── dev/
 │   │   └── generate_dev_certs.sh       # 開発用：自己署名生成（本番では未使用）
 │   ├── prod/
-│   │   └── issue_and_deploy_cert.sh    # 本番：発行→配布の一括実行
-│   └── remote_push_radius_cert.sh      # 本番：生成済み証明書の配布
+│   │   └── pull_and_deploy_from_s3.sh  # 本番：S3から取得してデプロイ（Pull方式）
 ├── docker-compose.yaml
 └── README.md
 ```

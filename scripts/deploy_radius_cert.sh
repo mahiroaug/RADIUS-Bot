@@ -3,7 +3,12 @@ set -euo pipefail
 
 # プロジェクトルートを推定（このスクリプトの親ディレクトリ）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# When invoked from prod/ scripts, project root is one level up; otherwise two levels up
+if [[ -d "${SCRIPT_DIR}/prod" ]]; then
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+else
+  PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
 
 # .env を読み込んで FQDN を取得（未設定なら既定値）
 if [[ -f "${PROJECT_ROOT}/.env" ]]; then
