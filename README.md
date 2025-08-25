@@ -24,8 +24,6 @@
 
 ## 事前準備
 - FQDN: `radius.example.com`（サーバ名検証に使用）
-- CAAを運用している場合はLet's Encryptを許可
-  - 例: `CAA 0 issue "letsencrypt.org"`
 - Route53: Lambda に最小権限のTXT更新権限を付与（RADIUSサーバにAWS資格情報は不要）
 - ネットワーク設計
   - VLAN10: 192.168.40.0/22（GW 192.168.40.1）
@@ -51,26 +49,162 @@ graph LR
 
 
 ## 環境変数（.env）
+- はじめての方は以下で雛形をコピーしてから編集してください
+```bash
+cp env.sample .env
+```
+
 - Radiusサーバサイド（botコンテナ）
   - `SLACK_APP_TOKEN=...`  Socket Mode用App-Level Token（xapp-）
   - `SLACK_BOT_TOKEN=...`  Bot User OAuth Token（xoxb-）
-  - `RADIUS_FQDN=...`  公開CAのFQDN（PEAPのサーバ名検証用）
 
 - Radiusサーバサイド（Pull配布用）
   - `CERT_URL_SERVER_PEM=...` S3上のserver.pem(URL)
   - `CERT_URL_SERVER_KEY=...` S3上のserver.key(URL)
   - `CERT_URL_CA_PEM=...`    S3上のca.pem(URL)
-  - `RADIUS_FQDN=...`  公開CAのFQDN（PEAPのサーバ名検証用）
+
+- common（共通）
+  - `AWS_REGION=ap-northeast-1`
+  - `RADIUS_FQDN=radius.example.com`
+
+- Lambda（デプロイ/実行用）
+  - `LAMBDA_FUNCTION_NAME=...`
+  - `ECR_REPO=...`  コンテナイメージを格納するECRリポジトリ名
+  - `IMAGE_TAG=$(date +%Y%m%d-%H%M%S)`  デフォルトは日時
+  - `EMAIL=admin@example.com`  ACME連絡用メール
+  - `S3_BUCKET=...`  証明書保存先バケット
+  - `S3_PREFIX=radius-test/`  バケット内パス（末尾スラッシュ推奨）
+  - `LAMBDA_ROLE_ARN=arn:aws:iam::<ACCOUNT_ID>:role/route53-dns01-radius-role`  実行ロールARN（新規作成時に使用）
+
+- EventBridge（スケジュール）
+  - `RULE_NAME=radius-certbot-weekly-mon-12jst`
+  - `CRON='cron(0 3 ? * MON *)'`  毎週月曜 12:00 JST（UTC 03:00）
 
 
 ---
 
 ## セットアップ手順（本番）
 
-### 証明書発行・保存（Lambda 側の要点）
-- certbot/lego + Route53 直更新（dns-01）。`_acme-challenge.<FQDN>` のTXTをLambdaが追加・検証・削除
-- 発行した `fullchain.pem`/`privkey.pem`/`ca` を S3(KMS) に保存
-- 固定の公開URL（`https://<bucket>.s3.<region>.amazonaws.com/<path>`）を使用し、S3バケットポリシーでRADIUSサーバの送信元IPに限定
+
+### 証明書準備（AWS 側）
+
+#### IAM（Route53 + S3 最小権限） `route53-dns01-radius-web3sst-role`
+
+ポリシー例
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowRoute53List",
+            "Effect": "Allow",
+            "Action": [
+                "route53:ListHostedZones",
+                "route53:ListHostedZonesByName"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "AllowZoneChanges",
+            "Effect": "Allow",
+            "Action": [
+                "route53:ChangeResourceRecordSets",
+                "route53:ListResourceRecordSets"
+            ],
+            "Resource": "arn:aws:route53:::hostedzone/xxxxxxxx"
+        },
+        {
+            "Sid": "AllowGetChange",
+            "Effect": "Allow",
+            "Action": "route53:GetChange",
+            "Resource": "arn:aws:route53:::change/*"
+        },
+        {
+            "Sid": "S3PutCerts",
+            "Effect": "Allow",
+            "Action": "s3:PutObject",
+            "Resource": "arn:aws:s3:::xxxxxxx/*"
+        }
+    ]
+}
+```
+
+上記に加えて、AWSLambdaBasicExecutionRole を付与
+
+
+ロール(TrustedEntity)
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "lambda.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+```
+
+2) S3 バケット作成＆ポリシー設定（固定公開URL + IP 制限）
+
+
+
+バケットポリシー例
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowPutFromLambdaRole",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::xxxxxxxxx:role/route53-dns01-radius-web3sst-role"
+            },
+            "Action": "s3:PutObject",
+            "Resource": "arn:aws:s3:::xxxxxxxxxx/*",
+            "Condition": {
+                "Bool": {
+                    "aws:SecureTransport": "true"
+                }
+            }
+        },
+        {
+            "Sid": "AllowGetFromAllowedIPs",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::xxxxxxxxxxxx/*",
+            "Condition": {
+                "Bool": {
+                    "aws:SecureTransport": "true"
+                },
+                "IpAddress": {
+                    "aws:SourceIp": "xxx.xxx.xxx.xxx/32"
+                }
+            }
+        }
+    ]
+}
+```
+
+3) Lambda デプロイ＆実行
+
+```bash
+bash -lc "./scripts/prod/deploy_lambda_image.sh"
+aws lambda invoke --function-name "$LAMBDA_FUNCTION_NAME" --region "$AWS_REGION" out.json | cat
+aws s3 ls "s3://$S3_BUCKET/$S3_PREFIX" | cat
+```
+
+4) EventBridge 作成（例: 毎週月曜 12:00 JST = UTC 03:00）
+
+```bash
+bash scripts/prod/schedule_lambda_eventbridge.sh
+aws events list-targets-by-rule --rule "$RULE_NAME" --region "$AWS_REGION" | cat
+```
+
 
 ### RADIUSサーバ側（サービス起動）
 1) リポジトリ取得
@@ -84,23 +218,40 @@ cd RADIUS-Bot
 cp radius/authorize.sample radius/authorize   # 初回のみ
 openssl dhparam -out radius/certs/dh 2048 && chmod 644 radius/certs/dh
 ```
-3) VLANサブIFとdnsmasq設定
+
+3) 証明書取得（Lambda → S3 → Pull 配布）
+```bash
+# 1) Lambda を手動実行（Let's Encrypt で発行し S3 に保存）
+aws lambda invoke --function-name "$LAMBDA_FUNCTION_NAME" --region "$AWS_REGION" out.json | cat
+
+# 2) S3 に生成物があるか確認
+aws s3 ls "s3://$S3_BUCKET/$S3_PREFIX" | cat
+
+# 3) RADIUS サーバへ取得・反映（差分検出。初回/強制は FORCE=1）
+FORCE=1 bash scripts/prod/pull_and_deploy_from_s3.sh
+
+# 4) 反映確認
+openssl x509 -in radius/certs/server.pem -noout -subject -enddate
+```
+
+
+4) VLANサブIFとdnsmasq設定
 ```bash
 # 例: 物理IFが eno1、VLAN10 を使用
 sudo ip link add link eno1 name eno1.10 type vlan id 10
 sudo ip link set eno1.10 up
 # dnsmasq/dnsmasq.conf の interface= を eno1.10 に変更
 ```
-4) 起動
+5) 起動
 ```bash
 docker-compose up -d --build
 ```
-5) ログ確認
+6) ログ確認
 ```bash
 docker-compose logs -f freeradius | sed -n '1,120p'
 docker-compose logs -f dnsmasq | sed -n '1,120p'
 ```
-6) Cisco Catalyst（例）
+7) Cisco Catalyst（例）
 ```cisco
 ! グローバル
 aaa new-model
@@ -182,25 +333,7 @@ sequenceDiagram
 補足
 - RADIUS サーバには AWS 資格情報を置かない（S3固定公開URL + ソースIP制限によるPull運用）
 
-
 ---
-
-
-## S3 Pull 方式（RADIUSサーバ側）
-
-- 事前: S3 バケットに `server.pem`(=fullchain), `server.key`(=privkey), `ca.pem` を保存
-  - 固定公開URLを使用し、S3バケットポリシーでRADIUSサーバの送信元IPに限定
-- 実行（RADIUSサーバ）
-```bash
-cat > .env << 'EOF'
-CERT_URL_SERVER_PEM=https://<bucket>.s3.<region>.amazonaws.com/<path>/server.pem
-CERT_URL_SERVER_KEY=https://<bucket>.s3.<region>.amazonaws.com/<path>/server.key
-CERT_URL_CA_PEM=https://<bucket>.s3.<region>.amazonaws.com/<path>/ca.pem
-EOF
-bash scripts/prod/pull_and_deploy_from_s3.sh
-```
-- 注意: `server.key` は転送後にローカルで600になるよう `deploy_radius_cert.sh` が権限設定します
-
 
 ## E2Eテスト
 1. Slackで `/radius_register` → ID/パスワード発行

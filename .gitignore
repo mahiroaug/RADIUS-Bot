@@ -23,3 +23,5 @@ radius/authorize
 dnsmasq/leases/*
 !dnsmasq/leases/.gitkeep
 
+
+out.json

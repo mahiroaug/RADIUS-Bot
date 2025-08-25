@@ -36,17 +36,28 @@ fi
 
 mkdir -p "${DEST_DIR}"
 
-# FreeRADIUSの期待名に合わせて配置
+# FreeRADIUSの期待名に合わせて配置（権限設定に失敗しても致命にしない）
 # - server.pem: サーバ証明書 + 中間証明書（fullchain.pem）
 # - server.key: サーバ秘密鍵
 # - ca.pem:     中間チェーン（chain.pem）
-install -m 0644 "${SRC_LIVE_DIR}/fullchain.pem" "${DEST_DIR}/server.pem"
-install -m 0600 "${SRC_LIVE_DIR}/privkey.pem"   "${DEST_DIR}/server.key"
+cp -f "${SRC_LIVE_DIR}/fullchain.pem" "${DEST_DIR}/server.pem"
+if ! chmod 0644 "${DEST_DIR}/server.pem" 2>/dev/null; then
+    echo "[deploy] WARN: chmod 0644 server.pem をスキップ（権限不足の可能性）" >&2
+fi
+
+cp -f "${SRC_LIVE_DIR}/privkey.pem"   "${DEST_DIR}/server.key"
+if ! chmod 0600 "${DEST_DIR}/server.key" 2>/dev/null; then
+    echo "[deploy] WARN: chmod 0600 server.key をスキップ（権限不足の可能性）" >&2
+fi
+
 if [[ -f "${SRC_LIVE_DIR}/chain.pem" ]]; then
-	install -m 0644 "${SRC_LIVE_DIR}/chain.pem" "${DEST_DIR}/ca.pem"
+    cp -f "${SRC_LIVE_DIR}/chain.pem" "${DEST_DIR}/ca.pem"
 else
-	# certbotのバージョンによっては chain.pem が無い場合があるため、fullchain から抽出せずそのままコピー
-	install -m 0644 "${SRC_LIVE_DIR}/fullchain.pem" "${DEST_DIR}/ca.pem"
+    # certbotのバージョンによっては chain.pem が無い場合があるため、fullchain をそのままコピー
+    cp -f "${SRC_LIVE_DIR}/fullchain.pem" "${DEST_DIR}/ca.pem"
+fi
+if ! chmod 0644 "${DEST_DIR}/ca.pem" 2>/dev/null; then
+    echo "[deploy] WARN: chmod 0644 ca.pem をスキップ（権限不足の可能性）" >&2
 fi
 
 echo "[deploy] Files installed: server.pem, server.key, ca.pem"

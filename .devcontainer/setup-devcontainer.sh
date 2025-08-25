@@ -38,11 +38,16 @@ if command -v apt-get >/dev/null 2>&1; then
     fi
     export DEBIAN_FRONTEND=noninteractive
     $SUDO apt-get update -y
-    $SUDO apt-get install -y certbot python3-certbot-dns-route53
+    $SUDO apt-get install -y certbot python3-certbot-dns-route53 awscli
     if command -v certbot >/dev/null 2>&1; then
         echo "certbot: $(certbot --version)"
         certbot plugins 2>/dev/null | grep -qi route53 && \
           echo "✅ Route53 plugin detected" || echo "⚠️ Route53 plugin not found"
+    fi
+    if command -v aws >/dev/null 2>&1; then
+        echo "aws: $(aws --version 2>&1 | head -n1)"
+    else
+        echo "⚠️ aws CLI が見つかりませんでした" >&2
     fi
 else
     echo "⚠️ apt-get がありません。ベースイメージに合わせて certbot と dns-route53 プラグインを手動導入してください。"
