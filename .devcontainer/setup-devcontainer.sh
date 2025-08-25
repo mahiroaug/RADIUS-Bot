@@ -17,6 +17,12 @@ python3 -m pip install pytest black flake8 isort pylint
 
 # ngrok不要（Socket Mode使用）
 
+# Lambda deps for local linting (boto3, etc.)
+if [ -f "lambda/requirements.txt" ]; then
+    echo "🧩 Installing lambda requirements for local linting..."
+    python3 -m pip install -r lambda/requirements.txt || true
+fi
+
 # Certbot + Route53 プラグイン（DNS-01 用）
 echo "🔐 Installing Certbot + Route53 plugin for DNS-01..."
 if command -v apt-get >/dev/null 2>&1; then
